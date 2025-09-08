@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# Encoder drivers
+#
+menu "Encoder drivers"
+
+config ENCODERV2
+	tristate "Encoder V2 driver"
+    default y
+	help
+	  Support module EncoderV2 to count speed.
+endmenu
