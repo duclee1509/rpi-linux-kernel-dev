@@ -581,3 +581,13 @@
 			   <&spi0>, "dmas:8=", <&dma40>;
 	};
 };
+
+/ {
+	soc {
+		encoder {
+			compatible = "encoder-module-v2";
+			irq-gpios = <&gpio 17 GPIO_ACTIVE_LOW>;
+			bias-pull-up;
+		};
+	};
+};
