@@ -5,6 +5,12 @@
 #include <linux/interrupt.h>
 #include <linux/of.h>
 #include <linux/ktime.h>
+#include <linux/device.h>
+#include <linux/init.h>
+#include <linux/fs.h>
+#include <linux/slab.h>
+
+#define DEVICE_NAME "encoder0"
 
 struct encoder_data {
     struct gpio_desc *irq_gpiod;
@@ -12,7 +18,40 @@ struct encoder_data {
     unsigned int count;
     ktime_t last_time;
     s64 delta_ns;
+
+    struct class *enc_class;
+    struct device *enc_device;
 };
+
+static ssize_t count_show(struct device *dev,
+                             struct device_attribute *attr, char *buf)
+{
+    struct encoder_data *data = dev_get_drvdata(dev);
+    return scnprintf(buf, PAGE_SIZE, "%d\n", data->count);
+}
+
+static ssize_t count_store(struct device *dev,
+                             struct device_attribute *attr,
+                             const char *buf, size_t count)
+{
+    struct encoder_data *data = dev_get_drvdata(dev);
+    unsigned int val;
+    if (kstrtouint(buf, 10, &val))
+        return -EINVAL;
+    data->count = val;
+    return count;
+}
+
+static DEVICE_ATTR_RW(count);
+
+static ssize_t delta_ns_show(struct device *dev,
+                             struct device_attribute *attr, char *buf)
+{
+    struct encoder_data *data = dev_get_drvdata(dev);
+    return scnprintf(buf, PAGE_SIZE, "%lld\n", data->delta_ns);
+}
+
+static DEVICE_ATTR_RO(delta_ns);
 
 static irqreturn_t encoder_irq_handler(int irq, void *dev_id)
 {
@@ -64,13 +103,54 @@ static int encoder_probe(struct platform_device *pdev)
         return ret;
     }
 
+    // Create sysfs interface
+    data->enc_class = class_create(THIS_MODULE, "encoder");
+    if (IS_ERR(data->enc_class)) {
+        dev_err(&pdev->dev, "Failed to create class\n");
+        ret = PTR_ERR(data->enc_class);
+        goto err_free;
+    }
+
+    data->enc_device = device_create(data->enc_class, NULL, 0, data, DEVICE_NAME);
+    if (IS_ERR(data->enc_device)) {
+        dev_err(&pdev->dev, "Failed to create device\n");
+        ret = PTR_ERR(data->enc_device);
+        goto err_class;
+    }
+
+    ret = device_create_file(data->enc_device, &dev_attr_count);
+    if (ret) {
+        dev_err(&pdev->dev, "Failed to create sysfs count file\n");
+        goto err_device;
+    }
+
+    ret = device_create_file(data->enc_device, &dev_attr_delta_ns);
+    if (ret) {
+        dev_err(&pdev->dev, "Failed to create sysfs delta_ns file\n");
+        goto err_device;
+    }
+
     dev_info(&pdev->dev, "Encoder driver probed successfully\n");
     platform_set_drvdata(pdev, data);
     return 0;
+
+err_device:
+    device_destroy(data->enc_class, 0);
+err_class:
+    class_destroy(data->enc_class);
+err_free:
+    devm_kfree(&pdev->dev, data);
+    return ret;
 }
 
 static int encoder_remove(struct platform_device *pdev)
 {
+    struct encoder_data *data = platform_get_drvdata(pdev);
+
+    device_remove_file(data->enc_device, &dev_attr_delta_ns);
+    device_destroy(data->enc_class, 0);
+    class_destroy(data->enc_class);
+    devm_kfree(&pdev->dev, data);
     dev_info(&pdev->dev, "Encoder driver removed\n");
     return 0;
 }
