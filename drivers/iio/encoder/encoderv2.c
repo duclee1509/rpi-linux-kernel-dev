@@ -4,22 +4,29 @@
 #include <linux/gpio/consumer.h>
 #include <linux/interrupt.h>
 #include <linux/of.h>
-
-#define ENCODER_PPR 20
+#include <linux/ktime.h>
 
 struct encoder_data {
     struct gpio_desc *irq_gpiod;
     int irq;
     unsigned int count;
+    ktime_t last_time;
+    s64 delta_ns;
 };
 
 static irqreturn_t encoder_irq_handler(int irq, void *dev_id)
 {
     struct encoder_data *data = dev_id;
+    ktime_t current_time = ktime_get();
 
+    if (ktime_to_ns(data->last_time) != 0) {
+        data->delta_ns = ktime_to_ns(ktime_sub(current_time, data->last_time));
+    }
+
+    // Increase count value
     data->count++;
 
-    pr_info("Encoder count: %u\n", data->count);
+    data->last_time = current_time;
 
     return IRQ_HANDLED;
 }
