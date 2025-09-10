@@ -9,8 +9,13 @@
 #include <linux/init.h>
 #include <linux/fs.h>
 #include <linux/slab.h>
+#include <linux/uaccess.h>
+#include <linux/cdev.h>
 
 #define DEVICE_NAME "encoder0"
+#define ENCODER_IOCTL_GET_DELTA _IOR('e', 1, s64)
+#define ENCODER_IOCTL_GET_COUNT _IOR('e', 2, unsigned int)
+#define ENCODER_IOCTL_RESET_COUNT _IO('e', 3)
 
 struct encoder_data {
     struct gpio_desc *irq_gpiod;
@@ -21,6 +26,9 @@ struct encoder_data {
 
     struct class *enc_class;
     struct device *enc_device;
+
+    struct cdev enc_cdev;
+    dev_t enc_devt;
 };
 
 static ssize_t count_show(struct device *dev,
@@ -52,6 +60,40 @@ static ssize_t delta_ns_show(struct device *dev,
 }
 
 static DEVICE_ATTR_RO(delta_ns);
+
+static long encoder_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+{
+    struct encoder_data *data = file->private_data;
+    switch (cmd) {
+        case ENCODER_IOCTL_GET_DELTA:
+            if (copy_to_user((s64 __user *)arg, &data->delta_ns, sizeof(data->delta_ns)))
+                return -EFAULT;
+            break;
+
+        case ENCODER_IOCTL_GET_COUNT:
+            if (copy_to_user((unsigned int __user *)arg, &data->count, sizeof(data->count)))
+                return -EFAULT;
+            break;
+        
+        case ENCODER_IOCTL_RESET_COUNT:
+            data->count = 0;
+            break;
+    }
+
+    return 0;
+}
+
+static int encoder_open(struct inode *inode, struct file *file)
+{
+    file->private_data = container_of(inode->i_cdev, struct encoder_data, enc_cdev);
+    return 0;
+}
+
+static const struct file_operations encoder_fops = {
+    .owner = THIS_MODULE,
+    .open = encoder_open,
+    .unlocked_ioctl = encoder_ioctl,
+};
 
 static irqreturn_t encoder_irq_handler(int irq, void *dev_id)
 {
@@ -103,12 +145,23 @@ static int encoder_probe(struct platform_device *pdev)
         return ret;
     }
 
+    // Allocate char device
+    ret = alloc_chrdev_region(&data->enc_devt, 0, 1, DEVICE_NAME);
+    if (ret)
+        return ret;
+
+    cdev_init(&data->enc_cdev, &encoder_fops);
+    data->enc_cdev.owner = THIS_MODULE;
+    ret = cdev_add(&data->enc_cdev, data->enc_devt, 1);
+    if (ret)
+        goto err_unregister;
+
     // Create sysfs interface
     data->enc_class = class_create(THIS_MODULE, "encoder");
     if (IS_ERR(data->enc_class)) {
         dev_err(&pdev->dev, "Failed to create class\n");
         ret = PTR_ERR(data->enc_class);
-        goto err_free;
+        goto err_cdev;
     }
 
     data->enc_device = device_create(data->enc_class, NULL, 0, data, DEVICE_NAME);
@@ -138,7 +191,10 @@ err_device:
     device_destroy(data->enc_class, 0);
 err_class:
     class_destroy(data->enc_class);
-err_free:
+err_cdev:
+    cdev_del(&data->enc_cdev);
+err_unregister:
+    unregister_chrdev_region(data->enc_devt, 1);
     devm_kfree(&pdev->dev, data);
     return ret;
 }
@@ -147,9 +203,15 @@ static int encoder_remove(struct platform_device *pdev)
 {
     struct encoder_data *data = platform_get_drvdata(pdev);
 
+    // Remove sysfs interface
     device_remove_file(data->enc_device, &dev_attr_delta_ns);
     device_destroy(data->enc_class, 0);
     class_destroy(data->enc_class);
+
+    // Remove char device
+    cdev_del(&data->enc_cdev);
+    unregister_chrdev_region(data->enc_devt, 1);
+
     devm_kfree(&pdev->dev, data);
     dev_info(&pdev->dev, "Encoder driver removed\n");
     return 0;
